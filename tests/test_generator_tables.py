@@ -181,6 +181,26 @@ def test_jsonb_default(generator: CodeGenerator) -> None:
     )
 
 
+@pytest.mark.parametrize("engine", ["postgresql"], indirect=["engine"])
+def test_json_default(generator: CodeGenerator) -> None:
+    Table("simple_items", generator.metadata, Column("json", postgresql.JSON))
+
+    validate_code(
+        generator.generate(),
+        """\
+        from sqlalchemy import Column, JSON, MetaData, Table
+
+        metadata = MetaData()
+
+
+        t_simple_items = Table(
+            'simple_items', metadata,
+            Column('json', JSON)
+        )
+        """,
+    )
+
+
 def test_enum_detection(generator: CodeGenerator) -> None:
     Table(
         "simple_items",
@@ -200,6 +220,80 @@ def test_enum_detection(generator: CodeGenerator) -> None:
         t_simple_items = Table(
             'simple_items', metadata,
             Column('enum', Enum('A', "\\\\'B", 'C'))
+        )
+        """,
+    )
+
+
+@pytest.mark.parametrize("engine", ["postgresql"], indirect=["engine"])
+def test_domain_text(generator: CodeGenerator) -> None:
+    Table(
+        "simple_items",
+        generator.metadata,
+        Column(
+            "postal_code",
+            postgresql.DOMAIN(
+                "us_postal_code",
+                Text,
+                constraint_name="valid_us_postal_code",
+                not_null=False,
+                check=text("VALUE ~ '^\\d{5}$' OR VALUE ~ '^\\d{5}-\\d{4}$'"),
+            ),
+            nullable=False,
+        ),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        from sqlalchemy import Column, MetaData, Table, Text, text
+        from sqlalchemy.dialects.postgresql import DOMAIN
+
+        metadata = MetaData()
+
+
+        t_simple_items = Table(
+            'simple_items', metadata,
+            Column('postal_code', DOMAIN('us_postal_code', Text(), \
+constraint_name='valid_us_postal_code', not_null=False, \
+check=text("VALUE ~ '^\\\\d{5}$' OR VALUE ~ '^\\\\d{5}-\\\\d{4}$'")), nullable=False)
+        )
+        """,
+    )
+
+
+@pytest.mark.parametrize("engine", ["postgresql"], indirect=["engine"])
+def test_domain_int(generator: CodeGenerator) -> None:
+    Table(
+        "simple_items",
+        generator.metadata,
+        Column(
+            "n",
+            postgresql.DOMAIN(
+                "positive_int",
+                INTEGER,
+                constraint_name="positive",
+                not_null=False,
+                check=text("VALUE > 0"),
+            ),
+            nullable=False,
+        ),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        from sqlalchemy import Column, INTEGER, MetaData, Table, text
+        from sqlalchemy.dialects.postgresql import DOMAIN
+
+        metadata = MetaData()
+
+
+        t_simple_items = Table(
+            'simple_items', metadata,
+            Column('n', DOMAIN('positive_int', INTEGER(), \
+constraint_name='positive', not_null=False, \
+check=text('VALUE > 0')), nullable=False)
         )
         """,
     )
@@ -238,6 +332,7 @@ def test_mysql_column_types(generator: CodeGenerator) -> None:
         generator.metadata,
         Column("id", mysql.INTEGER),
         Column("name", mysql.VARCHAR(255)),
+        Column("double", mysql.DOUBLE(1, 2)),
         Column("set", mysql.SET("one", "two")),
     )
 
@@ -245,7 +340,7 @@ def test_mysql_column_types(generator: CodeGenerator) -> None:
         generator.generate(),
         """\
         from sqlalchemy import Column, Integer, MetaData, String, Table
-        from sqlalchemy.dialects.mysql import SET
+        from sqlalchemy.dialects.mysql import DOUBLE, SET
 
         metadata = MetaData()
 
@@ -254,6 +349,7 @@ def test_mysql_column_types(generator: CodeGenerator) -> None:
             'simple_items', metadata,
             Column('id', Integer),
             Column('name', String(255)),
+            Column('double', DOUBLE(1, 2)),
             Column('set', SET('one', 'two'))
         )
         """,
