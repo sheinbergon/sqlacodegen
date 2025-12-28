@@ -103,6 +103,10 @@ values must be delimited by commas, e.g. ``--options noconstraints,nobidi``):
   * ``noconstraints``: ignore constraints (foreign key, unique etc.)
   * ``nocomments``: ignore table/column comments
   * ``noindexes``: ignore indexes
+  * ``noidsuffix``: prevent the special naming logic for single column many-to-one
+    and one-to-one relationships (see `Relationship naming logic`_ for details)
+  * ``include_dialect_options``: render a table' dialect options, such as ``starrocks_partition`` for StarRocks' specific options.
+  * ``keep_dialect_types``: preserve dialect-specific column types instead of adapting to generic SQLAlchemy types.
 
 * ``declarative``
 
@@ -204,3 +208,11 @@ sqlalchemy_ room on Gitter.
 
 .. _sqlacodegen discussion forum: https://github.com/agronholm/sqlacodegen/discussions/categories/q-a
 .. _sqlalchemy: https://app.gitter.im/#/room/#sqlalchemy_community:gitter.im
+
+Security contact information
+============================
+
+To report a security vulnerability, please use the `Tidelift security contact`_.
+Tidelift will coordinate the fix and disclosure.
+
+.. _Tidelift security contact: https://tidelift.com/security

@@ -21,18 +21,16 @@ classifiers = [
     "Topic :: Software Development :: Code Generators",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
-    "SQLAlchemy >= 2.0.29,<2.0.42",
+    "SQLAlchemy >= 2.0.29",
     "inflect >= 4.0.0",
-    "importlib_metadata; python_version < '3.10'",
-    "stdlib-list; python_version < '3.10'"
 ]
 dynamic = ["version"]
 
@@ -41,16 +39,9 @@ dynamic = ["version"]
 "Source Code" = "https://github.com/agronholm/sqlacodegen"
 
 [project.optional-dependencies]
-test = [
-    "sqlacodegen[sqlmodel,pgvector]",
-    "pytest >= 7.4",
-    "coverage >= 7",
-    "psycopg[binary]",
-    "mysql-connector-python",
-]
 sqlmodel = ["sqlmodel >= 0.0.22"]
 citext = ["sqlalchemy-citext >= 1.7.0"]
-geoalchemy2 = ["geoalchemy2 >= 0.11.1"]
+geoalchemy2 = ["geoalchemy2 >= 0.17.0"]
 pgvector = ["pgvector >= 0.2.4"]
 
 [project.entry-points."sqlacodegen.generators"]
@@ -61,6 +52,14 @@ sqlmodels = "sqlacodegen.generators:SQLModelGenerator"
 
 [project.scripts]
 sqlacodegen = "sqlacodegen.cli:main"
+
+[dependency-groups]
+test = [
+    "pytest >= 7.4",
+    "coverage >= 7",
+    "psycopg[binary]",
+    "mysql-connector-python",
+]
 
 [tool.setuptools_scm]
 version_scheme = "post-release"
@@ -95,10 +94,11 @@ relative_files = true
 show_missing = true
 
 [tool.tox]
-env_list = ["py39", "py310", "py311", "py312", "py313"]
+env_list = ["py310", "py311", "py312", "py313", "py314"]
 skip_missing_interpreters = true
 
 [tool.tox.env_run_base]
 package = "editable"
 commands = [["python", "-m", "pytest", { replace = "posargs", extend = true }]]
-extras = ["test"]
+dependency_groups = ["test"]
+extras = ["sqlmodel", "citext", "geoalchemy2", "pgvector"]

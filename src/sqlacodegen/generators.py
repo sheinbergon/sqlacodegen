@@ -119,7 +119,13 @@ class CodeGenerator(metaclass=ABCMeta):
 
 @dataclass(eq=False)
 class TablesGenerator(CodeGenerator):
-    valid_options: ClassVar[set[str]] = {"noindexes", "noconstraints", "nocomments"}
+    valid_options: ClassVar[set[str]] = {
+        "noindexes",
+        "noconstraints",
+        "nocomments",
+        "include_dialect_options",
+        "keep_dialect_types",
+    }
     stdlib_module_names: ClassVar[set[str]] = get_stdlib_module_names()
 
     def __init__(
@@ -134,6 +140,13 @@ class TablesGenerator(CodeGenerator):
         self.indentation: str = indentation
         self.imports: dict[str, set[str]] = defaultdict(set)
         self.module_imports: set[str] = set()
+
+        # Render SchemaItem.info and dialect kwargs (Table/Column) into output
+        self.include_dialect_options_and_info: bool = (
+            "include_dialect_options" in self.options
+        )
+        # Keep dialect-specific types instead of adapting to generic SQLAlchemy types
+        self.keep_dialect_types: bool = "keep_dialect_types" in self.options
 
     @property
     def views_supported(self) -> bool:
@@ -393,6 +406,10 @@ class TablesGenerator(CodeGenerator):
         if table_comment:
             kwargs["comment"] = repr(table.comment)
 
+        # add info + dialect kwargs for callable context (opt-in)
+        if self.include_dialect_options_and_info:
+            self._add_dialect_kwargs_and_info(table, kwargs, values_for_dict=False)
+
         return render_callable("Table", *args, kwargs=kwargs, indentation="    ")
 
     def render_index(self, index: Index) -> str:
@@ -410,7 +427,9 @@ class TablesGenerator(CodeGenerator):
         args = []
         kwargs: dict[str, Any] = {}
         kwarg = []
-        is_sole_pk = column.primary_key and len(column.table.primary_key) == 1
+        is_part_of_composite_pk = (
+            column.primary_key and len(column.table.primary_key) > 1
+        )
         dedicated_fks = [
             c
             for c in column.foreign_keys
@@ -460,8 +479,10 @@ class TablesGenerator(CodeGenerator):
             kwargs["key"] = column.key
         if is_primary:
             kwargs["primary_key"] = True
-        if not column.nullable and not is_sole_pk and is_table:
+        if not column.nullable and not column.primary_key:
             kwargs["nullable"] = False
+        if column.nullable and is_part_of_composite_pk:
+            kwargs["nullable"] = True
 
         if is_unique:
             column.unique = True
@@ -493,6 +514,10 @@ class TablesGenerator(CodeGenerator):
         comment = getattr(column, "comment", None)
         if comment:
             kwargs["comment"] = repr(comment)
+
+        # add column info + dialect kwargs for callable context (opt-in)
+        if self.include_dialect_options_and_info:
+            self._add_dialect_kwargs_and_info(column, kwargs, values_for_dict=False)
 
         return self.render_column_callable(is_table, *args, **kwargs)
 
@@ -611,6 +636,51 @@ class TablesGenerator(CodeGenerator):
 
         return render_callable(constraint.__class__.__name__, *args, kwargs=kwargs)
 
+    def _add_dialect_kwargs_and_info(
+        self, obj: Any, target_kwargs: dict[str, object], *, values_for_dict: bool
+    ) -> None:
+        """
+        Merge SchemaItem-like object's .info and .dialect_kwargs into target_kwargs.
+        - values_for_dict=True: keep raw values so pretty-printer emits repr() (for __table_args__ dict)
+        - values_for_dict=False: set values to repr() strings (for callable kwargs)
+        """
+        info_dict = getattr(obj, "info", None)
+        if info_dict:
+            target_kwargs["info"] = info_dict if values_for_dict else repr(info_dict)
+
+        dialect_keys: list[str]
+        try:
+            dialect_keys = sorted(getattr(obj, "dialect_kwargs"))
+        except Exception:
+            return
+
+        dialect_kwargs = getattr(obj, "dialect_kwargs", {})
+        for key in dialect_keys:
+            try:
+                value = dialect_kwargs[key]
+            except Exception:
+                continue
+
+            # Render values:
+            # - callable context (values_for_dict=False): produce a string expression.
+            #   primitives use repr(value); custom objects stringify then repr().
+            # - dict context (values_for_dict=True): pass raw primitives / str;
+            #   custom objects become str(value) so pformat quotes them.
+            if values_for_dict:
+                if isinstance(value, type(None) | bool | int | float):
+                    target_kwargs[key] = value
+                elif isinstance(value, str | dict | list):
+                    target_kwargs[key] = value
+                else:
+                    target_kwargs[key] = str(value)
+            else:
+                if isinstance(
+                    value, type(None) | bool | int | float | str | dict | list
+                ):
+                    target_kwargs[key] = repr(value)
+                else:
+                    target_kwargs[key] = repr(str(value))
+
     def should_ignore_table(self, table: Table) -> bool:
         # Support for Alembic and sqlalchemy-migrate -- never expose the schema version
         # tables
@@ -676,10 +746,11 @@ class TablesGenerator(CodeGenerator):
                             continue
 
         for column in table.c:
-            try:
-                column.type = self.get_adapted_type(column.type)
-            except CompileError:
-                pass
+            if not self.keep_dialect_types:
+                try:
+                    column.type = self.get_adapted_type(column.type)
+                except CompileError:
+                    continue
 
             # PostgreSQL specific fix: detect sequences from server_default
             if column.server_default and self.bind.dialect.name == "postgresql":
@@ -713,6 +784,20 @@ class TablesGenerator(CodeGenerator):
                     kw["name"] = coltype.name
                     if coltype.schema:
                         kw["schema"] = coltype.schema
+
+                # Hack to fix Postgres DOMAIN type adaptation, broken as of SQLAlchemy 2.0.42
+                # For additional information - https://github.com/agronholm/sqlacodegen/issues/416#issuecomment-3417480599
+                if supercls is DOMAIN:
+                    if coltype.default:
+                        kw["default"] = coltype.default
+                    if coltype.constraint_name is not None:
+                        kw["constraint_name"] = coltype.constraint_name
+                    if coltype.not_null:
+                        kw["not_null"] = coltype.not_null
+                    if coltype.check is not None:
+                        kw["check"] = coltype.check
+                    if coltype.create_type:
+                        kw["create_type"] = coltype.create_type
 
                 try:
                     new_coltype = coltype.adapt(supercls)
@@ -748,6 +833,7 @@ class DeclarativeGenerator(TablesGenerator):
         "use_inflect",
         "nojoined",
         "nobidi",
+        "noidsuffix",
     }
 
     def __init__(
@@ -1084,7 +1170,7 @@ class DeclarativeGenerator(TablesGenerator):
 
             # If there's a constraint with a single column that ends with "_id", use the
             # preceding part as the relationship name
-            if relationship.constraint:
+            if relationship.constraint and "noidsuffix" not in self.options:
                 is_source = relationship.source.table is relationship.constraint.table
                 if is_source or relationship.type not in (
                     RelationshipType.ONE_TO_ONE,
@@ -1174,7 +1260,7 @@ class DeclarativeGenerator(TablesGenerator):
 
     def render_table_args(self, table: Table) -> str:
         args: list[str] = []
-        kwargs: dict[str, str] = {}
+        kwargs: dict[str, object] = {}
 
         # Render constraints
         for constraint in sorted(table.constraints, key=get_constraint_sort_key):
@@ -1199,6 +1285,10 @@ class DeclarativeGenerator(TablesGenerator):
 
         if table.comment:
             kwargs["comment"] = table.comment
+
+        # add info + dialect kwargs for dict context (__table_args__) (opt-in)
+        if self.include_dialect_options_and_info:
+            self._add_dialect_kwargs_and_info(table, kwargs, values_for_dict=True)
 
         if kwargs:
             formatted_kwargs = pformat(kwargs)
@@ -1237,21 +1327,21 @@ class DeclarativeGenerator(TablesGenerator):
 
         def render_python_type(column_type: TypeEngine[Any]) -> str:
             if isinstance(column_type, DOMAIN):
-                python_type = column_type.data_type.python_type
-            else:
-                python_type = column_type.python_type
-
-            python_type_name = python_type.__name__
-            python_type_module = python_type.__module__
-            if python_type_module == "builtins":
-                return python_type_name
+                column_type = column_type.data_type
 
             try:
-                self.add_module_import(python_type_module)
-                return f"{python_type_module}.{python_type_name}"
+                python_type = column_type.python_type
+                python_type_module = python_type.__module__
+                python_type_name = python_type.__name__
             except NotImplementedError:
                 self.add_literal_import("typing", "Any")
                 return "Any"
+
+            if python_type_module == "builtins":
+                return python_type_name
+
+            self.add_module_import(python_type_module)
+            return f"{python_type_module}.{python_type_name}"
 
         pre, col_type, post = get_type_qualifiers()
         column_python_type = f"{pre}{render_python_type(col_type)}{post}"

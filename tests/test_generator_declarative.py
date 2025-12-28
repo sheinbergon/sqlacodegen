@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import sys
+
 import pytest
 from _pytest.fixtures import FixtureRequest
+from geoalchemy2 import Geography, Geometry
 from sqlalchemy import BIGINT, PrimaryKeyConstraint
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSON, JSONB
@@ -104,6 +107,180 @@ class SimpleItems(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     number: Mapped[Optional[int]] = mapped_column(Integer)
+        """,
+    )
+
+
+@pytest.mark.parametrize("generator", [["include_dialect_options"]], indirect=True)
+def test_include_dialect_options_and_info_table_and_column(
+    generator: CodeGenerator,
+) -> None:
+    from .test_generator_tables import _PartitionInfo
+
+    Table(
+        "t_opts",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True, starrocks_is_agg_key=True),
+        Column("name", VARCHAR, starrocks_agg_type="REPLACE"),
+        starrocks_aggregate_key="id",
+        starrocks_partition_by=_PartitionInfo("RANGE(id)"),
+        starrocks_security="DEFINER",
+        starrocks_PROPERTIES={"replication_num": "3", "storage_medium": "SSD"},
+        info={
+            "table_kind": "MATERIALIZED VIEW",
+            "definition": "SELECT id, name FROM t_opts_base_table",
+        },
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from typing import Optional
+
+from sqlalchemy import Integer, String
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+class Base(DeclarativeBase):
+    pass
+
+
+class TOpts(Base):
+    __tablename__ = 't_opts'
+    __table_args__ = {'info': {'definition': 'SELECT id, name FROM t_opts_base_table',
+              'table_kind': 'MATERIALIZED VIEW'},
+     'starrocks_PROPERTIES': {'replication_num': '3', 'storage_medium': 'SSD'},
+     'starrocks_aggregate_key': 'id',
+     'starrocks_partition_by': 'RANGE(id)',
+     'starrocks_security': 'DEFINER'}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, starrocks_is_agg_key=True)
+    name: Mapped[Optional[str]] = mapped_column(String, starrocks_agg_type='REPLACE')
+        """,
+    )
+
+
+@pytest.mark.parametrize("generator", [["include_dialect_options"]], indirect=True)
+def test_include_dialect_options_and_info_with_hyphen(generator: CodeGenerator) -> None:
+    Table(
+        "t_opts2",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        mysql_engine="InnoDB",
+        info={"table_kind": "View"},
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from sqlalchemy import Integer
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+class Base(DeclarativeBase):
+    pass
+
+
+class TOpts2(Base):
+    __tablename__ = 't_opts2'
+    __table_args__ = {'info': {'table_kind': 'View'}, 'mysql_engine': 'InnoDB'}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+        """,
+    )
+
+
+def test_include_dialect_options_not_enabled_skips(generator: CodeGenerator) -> None:
+    from .test_generator_tables import _PartitionInfo
+
+    Table(
+        "t_plain",
+        generator.metadata,
+        Column(
+            "id",
+            INTEGER,
+            primary_key=True,
+            info={"abc": True},
+            starrocks_is_agg_key=True,
+        ),
+        starrocks_engine="OLAP",
+        starrocks_partition_by=_PartitionInfo("RANGE(id)"),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from sqlalchemy import Integer
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+class Base(DeclarativeBase):
+    pass
+
+
+class TPlain(Base):
+    __tablename__ = 't_plain'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+        """,
+    )
+
+
+def test_keep_dialect_types_adapts_mysql_integer_default(
+    generator: CodeGenerator,
+) -> None:
+    from sqlalchemy.dialects.mysql import INTEGER as MYSQL_INTEGER
+
+    Table(
+        "num",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("val", MYSQL_INTEGER(), nullable=False),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from sqlalchemy import Integer
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Num(Base):
+    __tablename__ = 'num'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    val: Mapped[int] = mapped_column(Integer, nullable=False)
+        """,
+    )
+
+
+@pytest.mark.parametrize("generator", [["keep_dialect_types"]], indirect=True)
+def test_keep_dialect_types_keeps_mysql_integer(generator: CodeGenerator) -> None:
+    from sqlalchemy.dialects.mysql import INTEGER as MYSQL_INTEGER
+
+    Table(
+        "num2",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("val", MYSQL_INTEGER(), nullable=False),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from sqlalchemy import INTEGER
+from sqlalchemy.dialects.mysql import INTEGER
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Num2(Base):
+    __tablename__ = 'num2'
+
+    id: Mapped[int] = mapped_column(INTEGER, primary_key=True)
+    val: Mapped[int] = mapped_column(INTEGER, nullable=False)
         """,
     )
 
@@ -341,7 +518,7 @@ class SimpleItems(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     top_container_id: Mapped[int] = \
-mapped_column(ForeignKey('simple_containers.id'))
+mapped_column(ForeignKey('simple_containers.id'), nullable=False)
     parent_container_id: Mapped[Optional[int]] = \
 mapped_column(ForeignKey('simple_containers.id'))
 
@@ -812,6 +989,34 @@ t_container_items = Table(
     )
 
 
+def test_composite_nullable_pk(generator: CodeGenerator) -> None:
+    Table(
+        "simple_items",
+        generator.metadata,
+        Column("id1", INTEGER, primary_key=True),
+        Column("id2", INTEGER, primary_key=True, nullable=True),
+    )
+    validate_code(
+        generator.generate(),
+        """\
+from typing import Optional
+
+from sqlalchemy import Integer
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+class Base(DeclarativeBase):
+    pass
+
+
+class SimpleItems(Base):
+    __tablename__ = 'simple_items'
+
+    id1: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id2: Mapped[Optional[int]] = mapped_column(Integer, primary_key=True, nullable=True)
+        """,
+    )
+
+
 def test_joined_inheritance(generator: CodeGenerator) -> None:
     Table(
         "simple_sub_items",
@@ -1045,7 +1250,7 @@ class Group(Base):
     )
 
     groups_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    group_name: Mapped[str] = mapped_column(Text(50))
+    group_name: Mapped[str] = mapped_column(Text(50), nullable=False)
 
     users: Mapped[list['User']] = relationship('User', back_populates='group')
 
@@ -1532,6 +1737,62 @@ back_populates='simple_items')
     )
 
 
+@pytest.mark.parametrize("generator", [["noidsuffix"]], indirect=True)
+def test_named_foreign_key_constraints_with_noidsuffix(
+    generator: CodeGenerator,
+) -> None:
+    Table(
+        "simple_items",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("container_id", INTEGER),
+        ForeignKeyConstraint(
+            ["container_id"], ["simple_containers.id"], name="foreignkeytest"
+        ),
+    )
+    Table(
+        "simple_containers",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from typing import Optional
+
+from sqlalchemy import ForeignKeyConstraint, Integer
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+class Base(DeclarativeBase):
+    pass
+
+
+class SimpleContainers(Base):
+    __tablename__ = 'simple_containers'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    simple_items: Mapped[list['SimpleItems']] = relationship('SimpleItems', \
+back_populates='simple_containers')
+
+
+class SimpleItems(Base):
+    __tablename__ = 'simple_items'
+    __table_args__ = (
+        ForeignKeyConstraint(['container_id'], ['simple_containers.id'], \
+name='foreignkeytest'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    container_id: Mapped[Optional[int]] = mapped_column(Integer)
+
+    simple_containers: Mapped[Optional['SimpleContainers']] = relationship('SimpleContainers', \
+back_populates='simple_items')
+""",
+    )
+
+
 # @pytest.mark.xfail(strict=True)
 def test_colname_import_conflict(generator: CodeGenerator) -> None:
     Table(
@@ -1590,7 +1851,7 @@ class WithItems(Base):
     __tablename__ = 'with_items'
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    int_items_not_optional: Mapped[list[int]] = mapped_column(ARRAY(INTEGER()))
+    int_items_not_optional: Mapped[list[int]] = mapped_column(ARRAY(INTEGER()), nullable=False)
     str_matrix: Mapped[Optional[list[list[str]]]] = mapped_column(ARRAY(VARCHAR(), dimensions=2))
 """,
     )
@@ -1676,5 +1937,46 @@ class TestDomainJson(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     foo: Mapped[Optional[dict]] = mapped_column(DOMAIN('domain_json', {domain_type.__name__}(astext_type=Text(length=128)), not_null=False))
+""",
+    )
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 10),
+    reason="This test assumes GeoAlchemy2 0.18.x and above, which does not support python 3.9",
+)
+@pytest.mark.parametrize("engine", ["postgresql"], indirect=["engine"])
+def test_geoalchemy2_types(generator: CodeGenerator) -> None:
+    Table(
+        "spatial_table",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("geom", Geometry("POINT", srid=4326, dimension=2), nullable=False),
+        Column("geog", Geography("POLYGON", dimension=2)),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from typing import Any, Optional
+
+from geoalchemy2.types import Geography, Geometry
+from sqlalchemy import Index, Integer
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+class Base(DeclarativeBase):
+    pass
+
+
+class SpatialTable(Base):
+    __tablename__ = 'spatial_table'
+    __table_args__ = (
+        Index('idx_spatial_table_geog', 'geog'),
+        Index('idx_spatial_table_geom', 'geom')
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    geom: Mapped[Any] = mapped_column(Geometry('POINT', 4326, 2, from_text='ST_GeomFromEWKT', name='geometry', nullable=False), nullable=False)
+    geog: Mapped[Optional[Any]] = mapped_column(Geography('POLYGON', dimension=2, from_text='ST_GeogFromText', name='geography'))
 """,
     )

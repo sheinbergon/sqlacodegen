@@ -1,7 +1,24 @@
 Version history
 ===============
 
-**UNRELEASED**
+**3.2.0**
+
+- Dropped support for Python 3.9
+- Fix Postgres ``DOMAIN`` adaptation regression introduced in SQLAlchemy 2.0.42 (PR by @sheinbergon)
+- Support disabling special naming logic for single column many-to-one and one-to-one relationships
+  (PR by @Henkhogan, revised by @sheinbergon)
+- Add ``include_dialect_options`` option to render ``Table`` and ``Column``
+  dialect-specific kwargs and ``info`` in generated code. (PR by @jaogoy)
+- Add ``keep_dialect_types`` option to preserve dialect-specific column types instead of
+  adapting to generic SQLAlchemy types. (PR by @jaogoy)
+
+**3.1.1**
+
+- Fallback ``NotImplemented`` errors encountered when accessing ``python_type`` for
+  non-native types to ``typing.Any``
+  (PR by @sheinbergon, based on work by @danplischke)
+
+**3.1.0**
 
 - Type annotations for ARRAY column attributes now include the Python type of
   the array elements
@@ -14,6 +31,8 @@ Version history
 - Temporarily restrict SQLAlchemy version to 2.0.41 (PR by @sheinbergon)
 - Fixes ``add_import`` behavior when adding imports from sqlalchemy and overall better
   alignment of import behavior(s) across generators
+- Fixes ``nullable`` column behavior for non-null columns for both
+  ``sqlmodels`` and ``declarative`` generators (PR by @sheinbergon)
 
 **3.0.0**
 
