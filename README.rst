@@ -135,6 +135,9 @@ values must be delimited by commas, e.g. ``--options noconstraints,nobidi``):
 * ``sqlmodels``
 
   * all the options from ``declarative``
+  * ``nolinktables``: don't render many-to-many association tables as link model
+    classes (``Relationship(link_model=...)``); render them as plain ``Table`` objects
+    referenced via ``secondary`` instead
 
 Model class generators
 ----------------------

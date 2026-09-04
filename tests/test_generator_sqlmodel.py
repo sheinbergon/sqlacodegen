@@ -688,3 +688,49 @@ sa_relationship_kwargs={'secondary': 'nopk_association_table'})
             )
         """,
     )
+
+
+@pytest.mark.parametrize("generator", [["nolinktables"]], indirect=True)
+def test_manytomany_nolinktables(generator: CodeGenerator) -> None:
+    Table("nolink_left", generator.metadata, Column("id", INTEGER, primary_key=True))
+    Table("nolink_right", generator.metadata, Column("id", INTEGER, primary_key=True))
+    Table(
+        "nolink_association",
+        generator.metadata,
+        Column("left_id", INTEGER, primary_key=True),
+        Column("right_id", INTEGER, primary_key=True),
+        ForeignKeyConstraint(["left_id"], ["nolink_left.id"]),
+        ForeignKeyConstraint(["right_id"], ["nolink_right.id"]),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+            from sqlalchemy import Column, ForeignKey, Integer, Table
+            from sqlmodel import Field, Relationship, SQLModel
+
+            class NolinkLeft(SQLModel, table=True):
+                __tablename__ = 'nolink_left'
+
+                id: int = Field(sa_column=Column('id', Integer, primary_key=True))
+
+                right: list['NolinkRight'] = Relationship(back_populates='left', \
+sa_relationship_kwargs={'secondary': 'nolink_association'})
+
+
+            class NolinkRight(SQLModel, table=True):
+                __tablename__ = 'nolink_right'
+
+                id: int = Field(sa_column=Column('id', Integer, primary_key=True))
+
+                left: list['NolinkLeft'] = Relationship(back_populates='right', \
+sa_relationship_kwargs={'secondary': 'nolink_association'})
+
+
+            t_nolink_association = Table(
+                'nolink_association', SQLModel.metadata,
+                Column('left_id', ForeignKey('nolink_left.id'), primary_key=True),
+                Column('right_id', ForeignKey('nolink_right.id'), primary_key=True)
+            )
+        """,
+    )

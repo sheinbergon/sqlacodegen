@@ -1895,6 +1895,10 @@ class DataclassGenerator(DeclarativeGenerator):
 
 
 class SQLModelGenerator(DeclarativeGenerator):
+    valid_options: ClassVar[set[str]] = DeclarativeGenerator.valid_options | {
+        "nolinktables"
+    }
+
     def __init__(
         self,
         metadata: MetaData,
@@ -1929,7 +1933,7 @@ class SQLModelGenerator(DeclarativeGenerator):
 
     def generate_link_model(self, table: Table) -> Model:
         # SQLModel link models need a primary key; otherwise fall back to a plain Table
-        if not table.primary_key:
+        if "nolinktables" in self.options or not table.primary_key:
             return super().generate_link_model(table)
 
         model = ModelClass(table)
