@@ -7,6 +7,10 @@ Version history
   when the foreign key targets other columns (such as a ``UNIQUE`` constraint), which
   made mapper configuration fail with ``ArgumentError``
   (`#484 <https://github.com/agronholm/sqlacodegen/issues/484>`_; PR by @NixBiks)
+- Added support for many-to-many link models in the SQLModel generator: association
+  tables with a primary key are now rendered as ``SQLModel`` classes and referenced via
+  ``Relationship(link_model=...)`` instead of ``secondary``
+  (`#405 <https://github.com/agronholm/sqlacodegen/issues/405>`_; PR by @sheinbergon)
 
 **4.0.4**
 
