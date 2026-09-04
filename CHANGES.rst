@@ -1,7 +1,7 @@
 Version history
 ===============
 
-**5.0.0**
+**UNRELEASED**
 
 - **BACKWARD INCOMPATIBLE** The SQLModel generator no longer emits ``t_<tablename>``
   ``Table`` variables for many-to-many association tables that have a primary key, and
