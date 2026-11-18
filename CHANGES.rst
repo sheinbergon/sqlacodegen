@@ -1,6 +1,105 @@
 Version history
 ===============
 
+**UNRELEASED**
+
+- **BACKWARD INCOMPATIBLE** The SQLModel generator no longer emits ``t_<tablename>``
+  ``Table`` variables for many-to-many association tables that have a primary key, and
+  their relationships no longer pass ``secondary`` via ``sa_relationship_kwargs``.
+  Code importing those variables will break when models are regenerated. Use the
+  ``nolinktables`` option to keep the previous output.
+- Added support for many-to-many link models in the SQLModel generator: association
+  tables with a primary key are now rendered as ``SQLModel`` classes and referenced via
+  ``Relationship(link_model=...)``
+  (`#405 <https://github.com/agronholm/sqlacodegen/issues/405>`_; PR by @sheinbergon)
+- Fixed ``remote_side`` in a self-referential relationship pointing at the primary key
+  when the foreign key targets other columns (such as a ``UNIQUE`` constraint), which
+  made mapper configuration fail with ``ArgumentError``
+  (`#484 <https://github.com/agronholm/sqlacodegen/issues/484>`_; PR by @NixBiks)
+- Fixed a column named ``registry`` being rendered as-is, which made SQLAlchemy warn
+  that the attribute should be left reserved for the declarative class registry; it is
+  now renamed to ``registry_`` the same way a ``metadata`` column already was
+
+**4.0.4**
+
+- Added autoincrement to primary key columns to prevent missing field errors.
+  (`#473 <https://github.com/agronholm/sqlacodegen/issues/473>`_; PR by @jtmonroe)
+- Preserve dialect-specific ``ARRAY`` types (e.g. ``postgresql.ARRAY``) instead
+  of adapting them to the generic ``sqlalchemy.ARRAY``. The generic type does
+  not implement operators like ``.contains()``, so adapting silently broke
+  PostgreSQL array queries on generated models.
+  (`#441 <https://github.com/agronholm/sqlacodegen/issues/441>`_)
+
+**4.0.3**
+
+- Improved rendering of ``Identity`` server defaults by explicitly rendering
+  non-default parameters; ``Decimal`` values (as returned by some databases) are
+  now cast to ``int`` (PR by @NotCarlosSerrano)
+
+**4.0.2**
+
+- Fixed rendering of inherited keyword arguments for dialect-specific types that use
+  ``**kwargs`` in their initializers (such as MySQL ``CHAR`` with ``collation``) while
+  preserving existing ``*args`` rendering behavior (PR by @hyoj0942)
+- Fixed missing metadata argument when rendering plain tables with the SQLModel
+- Added support for self-referential tables in the SQLModel generator (PR by @sheinbergon)
+- Fixed empty dialect kwargs (e.g. ``postgresql_include=[]``) being included in
+  rendered indexes, tables, and columns (PR by @sheinbergon)
+
+**4.0.1**
+
+- Fix enum column definitions to explicitly include schema and name if reflected
+  via SQLAlchemy's Metadata (pr by @sheinbergon)
+
+**4.0.0**
+
+- **BACKWARD INCOMPATIBLE** API changes (for those who customize code generation by
+  subclassing the existing generators):
+
+  * Added new optional keyword argument, ``explicit_foreign_keys`` to
+    ``DeclarativeGenerator``, to force foreign keys to be rendered as
+    ``ClassName.attribute_name`` string references
+  * Removed the ``render_relationship_args()`` method from the SQLModel generator
+  * Added two new methods for customizing relationship rendering in
+    ``DeclarativeGenerator``:
+
+    * ``render_relationship_annotation()``: returns the appropriate type annotation
+      (without the ``Mapped`` wrapper) for the relationship
+    * ``render_relationship_arguments()``: returns a dictionary of keyword arguments to
+      ``sqlalchemy.orm.relationship()``
+
+**4.0.0rc3**
+
+- **BACKWARD INCOMPATIBLE** Relationship names changed when multiple FKs or junction tables
+  connect to the same target table. Regenerating models will break existing code.
+- Added support for generating Python enum classes for ``ARRAY(Enum(...))`` columns
+  (e.g., PostgreSQL ``ARRAY(ENUM)``). Supports named/unnamed enums, shared enums across
+  columns, and multi-dimensional arrays. Respects ``--options nonativeenums``.
+  (PR by @sheinbergon)
+- Improved relationship naming: one-to-many uses FK column names (e.g.,
+  ``simple_items_parent_container``), many-to-many uses junction table names (e.g.,
+  ``students_enrollments``). Use ``--options nofknames`` to revert to old behavior. (PR by @sheinbergon)
+- Fixed ``Index`` kwargs (e.g. ``mysql_length``) being ignored during code generation
+  (PR by @luliangce)
+- Fixed the SQLModel generator not adding the ``foreign_keys`` parameters when
+  generating multiple relationships between the same two tables
+
+**4.0.0rc2**
+
+- Add ``values_callable`` lambda to generated native enums column definitions.
+  This allows for proper enum value insertion when working with ORM models (PR by @sheinbergon)
+
+**4.0.0rc1**
+
+- **BACKWARD INCOMPATIBLE** ``TablesGenerator.render_column_type()`` was changed to
+  receive the ``Column`` object instead of the column type object as its sole argument
+- Added Python enum generation for native database ENUM types (e.g., PostgreSQL / MySQL ENUM).
+  Retained synthetic Python enum generation from CHECK constraints with
+  IN clauses (e.g., ``column IN ('val1', 'val2', ...)``). Use ``--options nonativeenums`` to
+  disable enum generation for native database enums. Use ``--options nosyntheticenums`` to
+  disable enum generation for synthetic database enums (VARCHAR columns with check constraints).
+  (PR by @sheinbergon)
+
 **3.2.0**
 
 - Dropped support for Python 3.9

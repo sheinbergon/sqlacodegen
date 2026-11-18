@@ -6,6 +6,7 @@ import pytest
 from _pytest.fixtures import FixtureRequest
 from geoalchemy2 import Geography, Geometry
 from sqlalchemy import BIGINT, PrimaryKeyConstraint
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSON, JSONB
 from sqlalchemy.engine import Engine
@@ -72,6 +73,41 @@ class SimpleItems(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     number: Mapped[Optional[int]] = mapped_column(Integer)
     text: Mapped[Optional[str]] = mapped_column(String)
+        """,
+    )
+
+
+def test_index_with_kwargs(generator: CodeGenerator) -> None:
+    simple_items = Table(
+        "simple_items",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("name", VARCHAR),
+    )
+    simple_items.indexes.add(
+        Index("idx_name", simple_items.c.name, postgresql_using="gist", mysql_length=10)
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from typing import Optional
+
+from sqlalchemy import Index, Integer, String
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+class Base(DeclarativeBase):
+    pass
+
+
+class SimpleItems(Base):
+    __tablename__ = 'simple_items'
+    __table_args__ = (
+        Index('idx_name', 'name', mysql_length=10, postgresql_using='gist'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[Optional[str]] = mapped_column(String)
         """,
     )
 
@@ -285,6 +321,40 @@ class Num2(Base):
     )
 
 
+@pytest.mark.parametrize("engine", ["mysql"], indirect=["engine"])
+@pytest.mark.parametrize("generator", [["keep_dialect_types"]], indirect=True)
+def test_keep_dialect_types_keeps_mysql_char_collation(
+    generator: CodeGenerator,
+) -> None:
+    from sqlalchemy.dialects.mysql import CHAR as MYSQL_CHAR
+    from sqlalchemy.dialects.mysql import INTEGER as MYSQL_INTEGER
+
+    Table(
+        "result_logs",
+        generator.metadata,
+        Column("id", MYSQL_INTEGER, primary_key=True),
+        Column("result_code", MYSQL_CHAR(1, collation="utf8mb3_bin"), nullable=False),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from sqlalchemy.dialects.mysql import CHAR, INTEGER
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+class Base(DeclarativeBase):
+    pass
+
+
+class ResultLogs(Base):
+    __tablename__ = 'result_logs'
+
+    id: Mapped[int] = mapped_column(INTEGER, primary_key=True)
+    result_code: Mapped[str] = mapped_column(CHAR(1, collation='utf8mb3_bin'), nullable=False)
+        """,
+    )
+
+
 def test_onetomany(generator: CodeGenerator) -> None:
     Table(
         "simple_items",
@@ -413,6 +483,56 @@ remote_side=[top_item_id], foreign_keys=[top_item_id], back_populates='top_item'
     )
 
 
+def test_onetomany_selfref_composite_unique_target(generator: CodeGenerator) -> None:
+    Table(
+        "simple_items",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("scheme", VARCHAR, nullable=False),
+        Column("code", VARCHAR, nullable=False),
+        Column("parent_scheme", VARCHAR),
+        Column("parent_code", VARCHAR),
+        UniqueConstraint("scheme", "code"),
+        ForeignKeyConstraint(
+            ["parent_scheme", "parent_code"],
+            ["simple_items.scheme", "simple_items.code"],
+        ),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from typing import Optional
+
+from sqlalchemy import ForeignKeyConstraint, Integer, String, UniqueConstraint
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+class Base(DeclarativeBase):
+    pass
+
+
+class SimpleItems(Base):
+    __tablename__ = 'simple_items'
+    __table_args__ = (
+        ForeignKeyConstraint(['parent_scheme', 'parent_code'], \
+['simple_items.scheme', 'simple_items.code']),
+        UniqueConstraint('scheme', 'code')
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scheme: Mapped[str] = mapped_column(String, nullable=False)
+    code: Mapped[str] = mapped_column(String, nullable=False)
+    parent_scheme: Mapped[Optional[str]] = mapped_column(String)
+    parent_code: Mapped[Optional[str]] = mapped_column(String)
+
+    simple_items: Mapped[Optional['SimpleItems']] = relationship('SimpleItems', \
+remote_side=[scheme, code], back_populates='simple_items_reverse')
+    simple_items_reverse: Mapped[list['SimpleItems']] = relationship('SimpleItems', \
+remote_side=[parent_scheme, parent_code], back_populates='simple_items')
+""",
+    )
+
+
 def test_onetomany_composite(generator: CodeGenerator) -> None:
     Table(
         "simple_items",
@@ -507,6 +627,63 @@ class SimpleContainers(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
 
+    simple_items_parent_container: Mapped[list['SimpleItems']] = relationship('SimpleItems', \
+foreign_keys='[SimpleItems.parent_container_id]', back_populates='parent_container')
+    simple_items_top_container: Mapped[list['SimpleItems']] = relationship('SimpleItems', \
+foreign_keys='[SimpleItems.top_container_id]', back_populates='top_container')
+
+
+class SimpleItems(Base):
+    __tablename__ = 'simple_items'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    top_container_id: Mapped[int] = \
+mapped_column(ForeignKey('simple_containers.id'), nullable=False)
+    parent_container_id: Mapped[Optional[int]] = \
+mapped_column(ForeignKey('simple_containers.id'))
+
+    parent_container: Mapped[Optional['SimpleContainers']] = relationship('SimpleContainers', \
+foreign_keys=[parent_container_id], back_populates='simple_items_parent_container')
+    top_container: Mapped['SimpleContainers'] = relationship('SimpleContainers', \
+foreign_keys=[top_container_id], back_populates='simple_items_top_container')
+        """,
+    )
+
+
+@pytest.mark.parametrize("generator", [["nofknames"]], indirect=True)
+def test_onetomany_multiref_with_nofknames(generator: CodeGenerator) -> None:
+    Table(
+        "simple_items",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("parent_container_id", INTEGER),
+        Column("top_container_id", INTEGER, nullable=False),
+        ForeignKeyConstraint(["parent_container_id"], ["simple_containers.id"]),
+        ForeignKeyConstraint(["top_container_id"], ["simple_containers.id"]),
+    )
+    Table(
+        "simple_containers",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from typing import Optional
+
+from sqlalchemy import ForeignKey, Integer
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+class Base(DeclarativeBase):
+    pass
+
+
+class SimpleContainers(Base):
+    __tablename__ = 'simple_containers'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
     simple_items: Mapped[list['SimpleItems']] = relationship('SimpleItems', \
 foreign_keys='[SimpleItems.parent_container_id]', back_populates='parent_container')
     simple_items_: Mapped[list['SimpleItems']] = relationship('SimpleItems', \
@@ -526,6 +703,192 @@ mapped_column(ForeignKey('simple_containers.id'))
 foreign_keys=[parent_container_id], back_populates='simple_items')
     top_container: Mapped['SimpleContainers'] = relationship('SimpleContainers', \
 foreign_keys=[top_container_id], back_populates='simple_items_')
+        """,
+    )
+
+
+def test_onetomany_multiref_no_id_suffix(generator: CodeGenerator) -> None:
+    Table(
+        "simple_items",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("parent_container", INTEGER),
+        Column("top_container", INTEGER, nullable=False),
+        ForeignKeyConstraint(["parent_container"], ["simple_containers.id"]),
+        ForeignKeyConstraint(["top_container"], ["simple_containers.id"]),
+    )
+    Table(
+        "simple_containers",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from typing import Optional
+
+from sqlalchemy import ForeignKey, Integer
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+class Base(DeclarativeBase):
+    pass
+
+
+class SimpleContainers(Base):
+    __tablename__ = 'simple_containers'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    simple_items_parent_container: Mapped[list['SimpleItems']] = relationship('SimpleItems', \
+foreign_keys='[SimpleItems.parent_container]', back_populates='simple_containers')
+    simple_items_top_container: Mapped[list['SimpleItems']] = relationship('SimpleItems', \
+foreign_keys='[SimpleItems.top_container]', back_populates='simple_containers_')
+
+
+class SimpleItems(Base):
+    __tablename__ = 'simple_items'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    top_container: Mapped[int] = mapped_column(ForeignKey('simple_containers.id'), nullable=False)
+    parent_container: Mapped[Optional[int]] = mapped_column(ForeignKey('simple_containers.id'))
+
+    simple_containers: Mapped[Optional['SimpleContainers']] = relationship('SimpleContainers', \
+foreign_keys=[parent_container], back_populates='simple_items_parent_container')
+    simple_containers_: Mapped['SimpleContainers'] = relationship('SimpleContainers', \
+foreign_keys=[top_container], back_populates='simple_items_top_container')
+        """,
+    )
+
+
+def test_onetomany_multiref_composite(generator: CodeGenerator) -> None:
+    Table(
+        "simple_items",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("parent_id1", INTEGER),
+        Column("parent_id2", INTEGER),
+        Column("top_id1", INTEGER),
+        Column("top_id2", INTEGER),
+        ForeignKeyConstraint(
+            ["parent_id1", "parent_id2"],
+            ["simple_containers.id1", "simple_containers.id2"],
+        ),
+        ForeignKeyConstraint(
+            ["top_id1", "top_id2"], ["simple_containers.id1", "simple_containers.id2"]
+        ),
+    )
+    Table(
+        "simple_containers",
+        generator.metadata,
+        Column("id1", INTEGER, primary_key=True),
+        Column("id2", INTEGER, primary_key=True),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from typing import Optional
+
+from sqlalchemy import ForeignKeyConstraint, Integer
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+class Base(DeclarativeBase):
+    pass
+
+
+class SimpleContainers(Base):
+    __tablename__ = 'simple_containers'
+
+    id1: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id2: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    simple_items_parent_id1_parent_id2: Mapped[list['SimpleItems']] = \
+relationship('SimpleItems', foreign_keys='[SimpleItems.parent_id1, SimpleItems.parent_id2]', \
+back_populates='parent_id1_parent_id2')
+    simple_items_top_id1_top_id2: Mapped[list['SimpleItems']] = relationship('SimpleItems', \
+foreign_keys='[SimpleItems.top_id1, SimpleItems.top_id2]', \
+back_populates='top_id1_top_id2')
+
+
+class SimpleItems(Base):
+    __tablename__ = 'simple_items'
+    __table_args__ = (
+        ForeignKeyConstraint(['parent_id1', 'parent_id2'], \
+['simple_containers.id1', 'simple_containers.id2']),
+        ForeignKeyConstraint(['top_id1', 'top_id2'], \
+['simple_containers.id1', 'simple_containers.id2'])
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    parent_id1: Mapped[Optional[int]] = mapped_column(Integer)
+    parent_id2: Mapped[Optional[int]] = mapped_column(Integer)
+    top_id1: Mapped[Optional[int]] = mapped_column(Integer)
+    top_id2: Mapped[Optional[int]] = mapped_column(Integer)
+
+    parent_id1_parent_id2: Mapped[Optional['SimpleContainers']] = \
+relationship('SimpleContainers', foreign_keys=[parent_id1, parent_id2], \
+back_populates='simple_items_parent_id1_parent_id2')
+    top_id1_top_id2: Mapped[Optional['SimpleContainers']] = \
+relationship('SimpleContainers', foreign_keys=[top_id1, top_id2], \
+back_populates='simple_items_top_id1_top_id2')
+        """,
+    )
+
+
+@pytest.mark.parametrize("generator", [["use_inflect"]], indirect=True)
+def test_onetomany_multiref_with_inflect(generator: CodeGenerator) -> None:
+    Table(
+        "simple_items",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("parent_container_id", INTEGER),
+        Column("top_container_id", INTEGER, nullable=False),
+        ForeignKeyConstraint(["parent_container_id"], ["simple_containers.id"]),
+        ForeignKeyConstraint(["top_container_id"], ["simple_containers.id"]),
+    )
+    Table(
+        "simple_containers",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from typing import Optional
+
+from sqlalchemy import ForeignKey, Integer
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+class Base(DeclarativeBase):
+    pass
+
+
+class SimpleContainer(Base):
+    __tablename__ = 'simple_containers'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    simple_items_parent_containers: Mapped[list['SimpleItem']] = relationship('SimpleItem', \
+foreign_keys='[SimpleItem.parent_container_id]', back_populates='parent_container')
+    simple_items_top_containers: Mapped[list['SimpleItem']] = relationship('SimpleItem', \
+foreign_keys='[SimpleItem.top_container_id]', back_populates='top_container')
+
+
+class SimpleItem(Base):
+    __tablename__ = 'simple_items'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    top_container_id: Mapped[int] = \
+mapped_column(ForeignKey('simple_containers.id'), nullable=False)
+    parent_container_id: Mapped[Optional[int]] = \
+mapped_column(ForeignKey('simple_containers.id'))
+
+    parent_container: Mapped[Optional['SimpleContainer']] = relationship('SimpleContainer', \
+foreign_keys=[parent_container_id], back_populates='simple_items_parent_containers')
+    top_container: Mapped['SimpleContainer'] = relationship('SimpleContainer', \
+foreign_keys=[top_container_id], back_populates='simple_items_top_containers')
         """,
     )
 
@@ -758,6 +1121,173 @@ mapped_column(ForeignKey('simple_containers.id'))
 
     container: Mapped[Optional['SimpleContainers']] = relationship('SimpleContainers')
 """,
+    )
+
+
+def test_manytomany_multi(generator: CodeGenerator) -> None:
+    Table(
+        "students",
+        generator.metadata,
+        Column("student_id", INTEGER, primary_key=True),
+        Column("name", VARCHAR),
+    )
+
+    Table(
+        "courses",
+        generator.metadata,
+        Column("course_id", INTEGER, primary_key=True),
+        Column("title", VARCHAR),
+    )
+
+    # First many-to-many relationship (enrollments)
+    Table(
+        "enrollments",
+        generator.metadata,
+        Column("student_id", INTEGER, ForeignKey("students.student_id")),
+        Column("course_id", INTEGER, ForeignKey("courses.course_id")),
+    )
+
+    # Second many-to-many relationship (waitlist)
+    Table(
+        "waitlist",
+        generator.metadata,
+        Column("student_id", INTEGER, ForeignKey("students.student_id")),
+        Column("course_id", INTEGER, ForeignKey("courses.course_id")),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from typing import Optional
+
+from sqlalchemy import Column, ForeignKey, Integer, String, Table
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Courses(Base):
+    __tablename__ = 'courses'
+
+    course_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[Optional[str]] = mapped_column(String)
+
+    students_enrollments: Mapped[list['Students']] = relationship('Students', \
+secondary='enrollments', back_populates='courses_enrollments')
+    students_waitlist: Mapped[list['Students']] = relationship('Students', \
+secondary='waitlist', back_populates='courses_waitlist')
+
+
+class Students(Base):
+    __tablename__ = 'students'
+
+    student_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[Optional[str]] = mapped_column(String)
+
+    courses_enrollments: Mapped[list['Courses']] = relationship('Courses', \
+secondary='enrollments', back_populates='students_enrollments')
+    courses_waitlist: Mapped[list['Courses']] = relationship('Courses', \
+secondary='waitlist', back_populates='students_waitlist')
+
+
+t_enrollments = Table(
+    'enrollments', Base.metadata,
+    Column('student_id', ForeignKey('students.student_id')),
+    Column('course_id', ForeignKey('courses.course_id'))
+)
+
+
+t_waitlist = Table(
+    'waitlist', Base.metadata,
+    Column('student_id', ForeignKey('students.student_id')),
+    Column('course_id', ForeignKey('courses.course_id'))
+)
+        """,
+    )
+
+
+@pytest.mark.parametrize("generator", [["nofknames"]], indirect=True)
+def test_manytomany_multi_with_nofknames(generator: CodeGenerator) -> None:
+    Table(
+        "students",
+        generator.metadata,
+        Column("student_id", INTEGER, primary_key=True),
+        Column("name", VARCHAR),
+    )
+
+    Table(
+        "courses",
+        generator.metadata,
+        Column("course_id", INTEGER, primary_key=True),
+        Column("title", VARCHAR),
+    )
+
+    # First many-to-many relationship (enrollments)
+    Table(
+        "enrollments",
+        generator.metadata,
+        Column("student_id", INTEGER, ForeignKey("students.student_id")),
+        Column("course_id", INTEGER, ForeignKey("courses.course_id")),
+    )
+
+    # Second many-to-many relationship (waitlist)
+    Table(
+        "waitlist",
+        generator.metadata,
+        Column("student_id", INTEGER, ForeignKey("students.student_id")),
+        Column("course_id", INTEGER, ForeignKey("courses.course_id")),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from typing import Optional
+
+from sqlalchemy import Column, ForeignKey, Integer, String, Table
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Courses(Base):
+    __tablename__ = 'courses'
+
+    course_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[Optional[str]] = mapped_column(String)
+
+    student: Mapped[list['Students']] = relationship('Students', secondary='enrollments', \
+back_populates='course')
+    student_: Mapped[list['Students']] = relationship('Students', secondary='waitlist', \
+back_populates='course_')
+
+
+class Students(Base):
+    __tablename__ = 'students'
+
+    student_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[Optional[str]] = mapped_column(String)
+
+    course: Mapped[list['Courses']] = relationship('Courses', secondary='enrollments', \
+back_populates='student')
+    course_: Mapped[list['Courses']] = relationship('Courses', secondary='waitlist', \
+back_populates='student_')
+
+
+t_enrollments = Table(
+    'enrollments', Base.metadata,
+    Column('student_id', ForeignKey('students.student_id')),
+    Column('course_id', ForeignKey('courses.course_id'))
+)
+
+
+t_waitlist = Table(
+    'waitlist', Base.metadata,
+    Column('student_id', ForeignKey('students.student_id')),
+    Column('course_id', ForeignKey('courses.course_id'))
+)
+        """,
     )
 
 
@@ -1013,6 +1543,32 @@ class SimpleItems(Base):
 
     id1: Mapped[int] = mapped_column(Integer, primary_key=True)
     id2: Mapped[Optional[int]] = mapped_column(Integer, primary_key=True, nullable=True)
+        """,
+    )
+
+
+def test_composite_autoincrement_pk(generator: CodeGenerator) -> None:
+    Table(
+        "simple_autoincrement_items",
+        generator.metadata,
+        Column("id1", INTEGER, primary_key=True, autoincrement=True),
+        Column("id2", INTEGER, primary_key=True),
+    )
+    validate_code(
+        generator.generate(),
+        """\
+from sqlalchemy import Integer
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+class Base(DeclarativeBase):
+    pass
+
+
+class SimpleAutoincrementItems(Base):
+    __tablename__ = 'simple_autoincrement_items'
+
+    id1: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id2: Mapped[int] = mapped_column(Integer, primary_key=True)
         """,
     )
 
@@ -1573,6 +2129,35 @@ class Simple(Base):
     )
 
 
+def test_registry_column(generator: CodeGenerator) -> None:
+    Table(
+        "simple",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("registry", VARCHAR),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from typing import Optional
+
+from sqlalchemy import Integer, String
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Simple(Base):
+    __tablename__ = 'simple'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    registry_: Mapped[Optional[str]] = mapped_column('registry', String)
+""",
+    )
+
+
 def test_metadata_column(generator: CodeGenerator) -> None:
     Table(
         "simple",
@@ -1971,12 +2556,785 @@ class Base(DeclarativeBase):
 class SpatialTable(Base):
     __tablename__ = 'spatial_table'
     __table_args__ = (
-        Index('idx_spatial_table_geog', 'geog'),
-        Index('idx_spatial_table_geom', 'geom')
+        Index('idx_spatial_table_geog', 'geog', postgresql_using='gist'),
+        Index('idx_spatial_table_geom', 'geom', postgresql_using='gist')
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     geom: Mapped[Any] = mapped_column(Geometry('POINT', 4326, 2, from_text='ST_GeomFromEWKT', name='geometry', nullable=False), nullable=False)
     geog: Mapped[Optional[Any]] = mapped_column(Geography('POLYGON', dimension=2, from_text='ST_GeogFromText', name='geography'))
 """,
+    )
+
+
+def test_enum_nonativeenums_option(generator: CodeGenerator) -> None:
+    Table(
+        "users",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "status",
+            SAEnum("active", "inactive", "pending", name="status_enum"),
+            nullable=False,
+        ),
+    )
+
+    # Recreate generator with nonativeenums option
+    generator = DeclarativeGenerator(
+        generator.metadata, generator.bind, ["nonativeenums"]
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        from sqlalchemy import Enum, Integer
+        from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+        class Base(DeclarativeBase):
+            pass
+
+
+        class Users(Base):
+            __tablename__ = 'users'
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            status: Mapped[str] = mapped_column(Enum('active', 'inactive', 'pending', name='status_enum'), nullable=False)
+        """,
+    )
+
+
+def test_enum_shared_values(generator: CodeGenerator) -> None:
+    Table(
+        "users",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "status",
+            SAEnum("active", "inactive", "pending", name="status_enum"),
+            nullable=False,
+        ),
+    )
+    Table(
+        "accounts",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "status",
+            SAEnum("active", "inactive", "pending", name="status_enum"),
+            nullable=False,
+        ),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import Enum, Integer
+        from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+        class Base(DeclarativeBase):
+            pass
+
+
+        class StatusEnum(str, enum.Enum):
+            ACTIVE = 'active'
+            INACTIVE = 'inactive'
+            PENDING = 'pending'
+
+
+        class Accounts(Base):
+            __tablename__ = 'accounts'
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            status: Mapped[StatusEnum] = mapped_column(Enum(StatusEnum, values_callable=lambda cls: [member.value for member in cls], name='status_enum'), nullable=False)
+
+
+        class Users(Base):
+            __tablename__ = 'users'
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            status: Mapped[StatusEnum] = mapped_column(Enum(StatusEnum, values_callable=lambda cls: [member.value for member in cls], name='status_enum'), nullable=False)
+        """,
+    )
+
+
+def test_enum_unnamed(generator: CodeGenerator) -> None:
+    Table(
+        "users",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "status",
+            SAEnum("active", "inactive", "pending"),
+            nullable=False,
+        ),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import Enum, Integer
+        from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+        class Base(DeclarativeBase):
+            pass
+
+
+        class UsersStatus(str, enum.Enum):
+            ACTIVE = 'active'
+            INACTIVE = 'inactive'
+            PENDING = 'pending'
+
+
+        class Users(Base):
+            __tablename__ = 'users'
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            status: Mapped[UsersStatus] = mapped_column(Enum(UsersStatus, values_callable=lambda cls: [member.value for member in cls]), nullable=False)
+        """,
+    )
+
+
+def test_enum_unnamed_reuse_same_values(generator: CodeGenerator) -> None:
+    # table "a_b", column "c" -> A + B + C = ABC
+    # table "a", column "b_c" -> A + B + C = ABC
+    # Both generate same name with same values, so reuse
+    Table(
+        "a_b",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "c",
+            SAEnum("active", "inactive"),
+            nullable=False,
+        ),
+    )
+    Table(
+        "a",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "b_c",
+            SAEnum("active", "inactive"),
+            nullable=False,
+        ),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import Enum, Integer
+        from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+        class Base(DeclarativeBase):
+            pass
+
+
+        class ABC(str, enum.Enum):
+            ACTIVE = 'active'
+            INACTIVE = 'inactive'
+
+
+        class A(Base):
+            __tablename__ = 'a'
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            b_c: Mapped[ABC] = mapped_column(Enum(ABC, values_callable=lambda cls: [member.value for member in cls]), nullable=False)
+
+
+        class AB(Base):
+            __tablename__ = 'a_b'
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            c: Mapped[ABC] = mapped_column(Enum(ABC, values_callable=lambda cls: [member.value for member in cls]), nullable=False)
+        """,
+    )
+
+
+def test_enum_unnamed_name_collision_different_values(generator: CodeGenerator) -> None:
+    # table "a_b", column "c" -> A + B + C = ABC
+    # table "a", column "b_c" -> A + B + C = ABC
+    # Same name but different values, so append counter
+    Table(
+        "a_b",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "c",
+            SAEnum("active", "inactive"),
+            nullable=False,
+        ),
+    )
+    Table(
+        "a",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "b_c",
+            SAEnum("pending", "complete"),
+            nullable=False,
+        ),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import Enum, Integer
+        from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+        class Base(DeclarativeBase):
+            pass
+
+
+        class ABC(str, enum.Enum):
+            ACTIVE = 'active'
+            INACTIVE = 'inactive'
+
+
+        class ABC1(str, enum.Enum):
+            PENDING = 'pending'
+            COMPLETE = 'complete'
+
+
+        class A(Base):
+            __tablename__ = 'a'
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            b_c: Mapped[ABC1] = mapped_column(Enum(ABC1, values_callable=lambda cls: [member.value for member in cls]), nullable=False)
+
+
+        class AB(Base):
+            __tablename__ = 'a_b'
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            c: Mapped[ABC] = mapped_column(Enum(ABC, values_callable=lambda cls: [member.value for member in cls]), nullable=False)
+        """,
+    )
+
+
+def test_synthetic_enum_generation(generator: CodeGenerator) -> None:
+    Table(
+        "users",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("status", VARCHAR(20), nullable=False),
+        CheckConstraint("users.status IN ('active', 'inactive', 'pending')"),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import CheckConstraint, Enum, Integer
+        from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+        class Base(DeclarativeBase):
+            pass
+
+
+        class UsersStatus(str, enum.Enum):
+            ACTIVE = 'active'
+            INACTIVE = 'inactive'
+            PENDING = 'pending'
+
+
+        class Users(Base):
+            __tablename__ = 'users'
+            __table_args__ = (
+                CheckConstraint("users.status IN ('active', 'inactive', 'pending')"),
+            )
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            status: Mapped[UsersStatus] = mapped_column(Enum(UsersStatus, values_callable=lambda cls: [member.value for member in cls]), nullable=False)
+        """,
+    )
+
+
+def test_synthetic_enum_nosyntheticenums_option(generator: CodeGenerator) -> None:
+    Table(
+        "users",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("status", VARCHAR(20), nullable=False),
+        CheckConstraint("users.status IN ('active', 'inactive', 'pending')"),
+    )
+
+    # Recreate generator with nosyntheticenums option
+    generator = DeclarativeGenerator(
+        generator.metadata, generator.bind, ["nosyntheticenums"]
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        from sqlalchemy import CheckConstraint, Integer, String
+        from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+        class Base(DeclarativeBase):
+            pass
+
+
+        class Users(Base):
+            __tablename__ = 'users'
+            __table_args__ = (
+                CheckConstraint("users.status IN ('active', 'inactive', 'pending')"),
+            )
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            status: Mapped[str] = mapped_column(String(20), nullable=False)
+        """,
+    )
+
+
+def test_synthetic_enum_shared_values(generator: CodeGenerator) -> None:
+    Table(
+        "users",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("status", VARCHAR(20), nullable=False),
+        CheckConstraint("users.status IN ('active', 'inactive', 'pending')"),
+    )
+    Table(
+        "accounts",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("status", VARCHAR(20), nullable=False),
+        CheckConstraint("accounts.status IN ('active', 'inactive', 'pending')"),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import CheckConstraint, Enum, Integer
+        from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+        class Base(DeclarativeBase):
+            pass
+
+
+        class AccountsStatus(str, enum.Enum):
+            ACTIVE = 'active'
+            INACTIVE = 'inactive'
+            PENDING = 'pending'
+
+
+        class UsersStatus(str, enum.Enum):
+            ACTIVE = 'active'
+            INACTIVE = 'inactive'
+            PENDING = 'pending'
+
+
+        class Accounts(Base):
+            __tablename__ = 'accounts'
+            __table_args__ = (
+                CheckConstraint("accounts.status IN ('active', 'inactive', 'pending')"),
+            )
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            status: Mapped[AccountsStatus] = mapped_column(Enum(AccountsStatus, values_callable=lambda cls: [member.value for member in cls]), nullable=False)
+
+
+        class Users(Base):
+            __tablename__ = 'users'
+            __table_args__ = (
+                CheckConstraint("users.status IN ('active', 'inactive', 'pending')"),
+            )
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            status: Mapped[UsersStatus] = mapped_column(Enum(UsersStatus, values_callable=lambda cls: [member.value for member in cls]), nullable=False)
+        """,
+    )
+
+
+def test_array_enum_named(generator: CodeGenerator) -> None:
+    Table(
+        "users",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "roles",
+            ARRAY(SAEnum("admin", "user", "moderator", name="role_enum")),
+            nullable=False,
+        ),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import ARRAY, Enum, Integer
+        from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+        class Base(DeclarativeBase):
+            pass
+
+
+        class RoleEnum(str, enum.Enum):
+            ADMIN = 'admin'
+            USER = 'user'
+            MODERATOR = 'moderator'
+
+
+        class Users(Base):
+            __tablename__ = 'users'
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            roles: Mapped[list[RoleEnum]] = mapped_column(ARRAY(Enum(RoleEnum, values_callable=lambda cls: [member.value for member in cls], name='role_enum')), nullable=False)
+        """,
+    )
+
+
+def test_array_enum_unnamed(generator: CodeGenerator) -> None:
+    Table(
+        "users",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "roles",
+            ARRAY(SAEnum("admin", "user")),
+            nullable=False,
+        ),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import ARRAY, Enum, Integer
+        from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+        class Base(DeclarativeBase):
+            pass
+
+
+        class UsersRoles(str, enum.Enum):
+            ADMIN = 'admin'
+            USER = 'user'
+
+
+        class Users(Base):
+            __tablename__ = 'users'
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            roles: Mapped[list[UsersRoles]] = mapped_column(ARRAY(Enum(UsersRoles, values_callable=lambda cls: [member.value for member in cls])), nullable=False)
+        """,
+    )
+
+
+def test_array_enum_nullable(generator: CodeGenerator) -> None:
+    Table(
+        "users",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "roles",
+            ARRAY(SAEnum("admin", "user", name="role_enum")),
+        ),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        from typing import Optional
+        import enum
+
+        from sqlalchemy import ARRAY, Enum, Integer
+        from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+        class Base(DeclarativeBase):
+            pass
+
+
+        class RoleEnum(str, enum.Enum):
+            ADMIN = 'admin'
+            USER = 'user'
+
+
+        class Users(Base):
+            __tablename__ = 'users'
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            roles: Mapped[Optional[list[RoleEnum]]] = mapped_column(ARRAY(Enum(RoleEnum, values_callable=lambda cls: [member.value for member in cls], name='role_enum')))
+        """,
+    )
+
+
+def test_array_enum_with_dimensions(generator: CodeGenerator) -> None:
+    Table(
+        "items",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "tag_matrix",
+            ARRAY(SAEnum("a", "b", name="tag_enum"), dimensions=2),
+            nullable=False,
+        ),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import ARRAY, Enum, Integer
+        from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+        class Base(DeclarativeBase):
+            pass
+
+
+        class TagEnum(str, enum.Enum):
+            A = 'a'
+            B = 'b'
+
+
+        class Items(Base):
+            __tablename__ = 'items'
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            tag_matrix: Mapped[list[list[TagEnum]]] = mapped_column(ARRAY(Enum(TagEnum, values_callable=lambda cls: [member.value for member in cls], name='tag_enum'), dimensions=2), nullable=False)
+        """,
+    )
+
+
+def test_array_enum_nonativeenums_option(generator: CodeGenerator) -> None:
+    Table(
+        "users",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "roles",
+            ARRAY(SAEnum("admin", "user", name="role_enum")),
+            nullable=False,
+        ),
+    )
+
+    generator = DeclarativeGenerator(
+        generator.metadata, generator.bind, ["nonativeenums"]
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        from sqlalchemy import ARRAY, Enum, Integer
+        from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+        class Base(DeclarativeBase):
+            pass
+
+
+        class Users(Base):
+            __tablename__ = 'users'
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            roles: Mapped[list[str]] = mapped_column(ARRAY(Enum('admin', 'user', name='role_enum')), nullable=False)
+        """,
+    )
+
+
+def test_array_enum_shared_with_regular_enum(generator: CodeGenerator) -> None:
+    Table(
+        "users",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "primary_role",
+            SAEnum("admin", "user", name="role_enum"),
+            nullable=False,
+        ),
+        Column(
+            "all_roles",
+            ARRAY(SAEnum("admin", "user", name="role_enum")),
+            nullable=False,
+        ),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import ARRAY, Enum, Integer
+        from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+        class Base(DeclarativeBase):
+            pass
+
+
+        class RoleEnum(str, enum.Enum):
+            ADMIN = 'admin'
+            USER = 'user'
+
+
+        class Users(Base):
+            __tablename__ = 'users'
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            primary_role: Mapped[RoleEnum] = mapped_column(Enum(RoleEnum, values_callable=lambda cls: [member.value for member in cls], name='role_enum'), nullable=False)
+            all_roles: Mapped[list[RoleEnum]] = mapped_column(ARRAY(Enum(RoleEnum, values_callable=lambda cls: [member.value for member in cls], name='role_enum')), nullable=False)
+        """,
+    )
+
+
+def test_enum_named_with_schema(generator: CodeGenerator) -> None:
+    Table(
+        "my_table",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "status",
+            SAEnum("active", "inactive", name="status_enum", schema="custom_schema"),
+            nullable=False,
+        ),
+        schema="custom_schema",
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import Enum, Integer
+        from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+        class Base(DeclarativeBase):
+            pass
+
+
+        class StatusEnum(str, enum.Enum):
+            ACTIVE = 'active'
+            INACTIVE = 'inactive'
+
+
+        class MyTable(Base):
+            __tablename__ = 'my_table'
+            __table_args__ = {'schema': 'custom_schema'}
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            status: Mapped[StatusEnum] = mapped_column(Enum(StatusEnum, values_callable=lambda cls: [member.value for member in cls], name='status_enum', schema='custom_schema'), nullable=False)
+        """,
+    )
+
+
+def test_array_enum_named_with_schema(generator: CodeGenerator) -> None:
+    Table(
+        "my_table",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "tags",
+            ARRAY(SAEnum("a", "b", name="tag_enum", schema="custom_schema")),
+            nullable=False,
+        ),
+        schema="custom_schema",
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import ARRAY, Enum, Integer
+        from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+        class Base(DeclarativeBase):
+            pass
+
+
+        class TagEnum(str, enum.Enum):
+            A = 'a'
+            B = 'b'
+
+
+        class MyTable(Base):
+            __tablename__ = 'my_table'
+            __table_args__ = {'schema': 'custom_schema'}
+
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            tags: Mapped[list[TagEnum]] = mapped_column(ARRAY(Enum(TagEnum, values_callable=lambda cls: [member.value for member in cls], name='tag_enum', schema='custom_schema')), nullable=False)
+        """,
+    )
+
+
+def test_index_with_empty_kwargs(generator: CodeGenerator) -> None:
+    simple_items = Table(
+        "simple_items",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("name", VARCHAR),
+    )
+    simple_items.indexes.add(
+        Index(
+            "idx_name",
+            simple_items.c.name,
+            postgresql_using="gist",
+            postgresql_include=[],
+        )
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from typing import Optional
+
+from sqlalchemy import Index, Integer, String
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+class Base(DeclarativeBase):
+    pass
+
+
+class SimpleItems(Base):
+    __tablename__ = 'simple_items'
+    __table_args__ = (
+        Index('idx_name', 'name', postgresql_using='gist'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[Optional[str]] = mapped_column(String)
+        """,
+    )
+
+
+@pytest.mark.parametrize("generator", [["include_dialect_options"]], indirect=True)
+def test_include_dialect_options_empty_values_skipped(
+    generator: CodeGenerator,
+) -> None:
+    Table(
+        "t_opts3",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        mysql_engine="InnoDB",
+        mysql_partition_by=[],
+        mysql_PROPERTIES={},
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+from sqlalchemy import Integer
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+class Base(DeclarativeBase):
+    pass
+
+
+class TOpts3(Base):
+    __tablename__ = 't_opts3'
+    __table_args__ = {'mysql_engine': 'InnoDB'}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+        """,
     )

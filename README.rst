@@ -4,6 +4,9 @@
 .. image:: https://coveralls.io/repos/github/agronholm/sqlacodegen/badge.svg?branch=master
   :target: https://coveralls.io/github/agronholm/sqlacodegen?branch=master
   :alt: Code Coverage
+.. image:: https://tidelift.com/badges/package/pypi/sqlacodegen
+  :target: https://tidelift.com/subscription/pkg/pypi-sqlacodegen
+  :alt: Tidelift
 
 This is a tool that reads the structure of an existing database and generates the
 appropriate SQLAlchemy model code, using the declarative style if possible.
@@ -103,6 +106,8 @@ values must be delimited by commas, e.g. ``--options noconstraints,nobidi``):
   * ``noconstraints``: ignore constraints (foreign key, unique etc.)
   * ``nocomments``: ignore table/column comments
   * ``noindexes``: ignore indexes
+  * ``nonativeenums``: don't generate Python enum classes for native database ENUM types (e.g., PostgreSQL ENUM); use plain string mapping instead
+  * ``nosyntheticenums``: don't generate Python enum classes from CHECK constraints with IN clauses (e.g., ``column IN ('value1', 'value2', ...)``); preserves CHECK constraints as-is
   * ``noidsuffix``: prevent the special naming logic for single column many-to-one
     and one-to-one relationships (see `Relationship naming logic`_ for details)
   * ``include_dialect_options``: render a table' dialect options, such as ``starrocks_partition`` for StarRocks' specific options.
@@ -117,6 +122,11 @@ values must be delimited by commas, e.g. ``--options noconstraints,nobidi``):
   * ``nobidi``: generate relationships in a unidirectional fashion, so only the
     many-to-one or first side of many-to-many relationships gets a relationship
     attribute, as on v2.X
+  * ``nofknames``: disable improved relationship naming when multiple FKs or
+    junction tables connect to the same target. By default, uses FK column names
+    for one-to-many (e.g., ``simple_items_parent_container``) and junction table
+    names for many-to-many (e.g., ``students_enrollments``). Reverts to
+    underscore suffixes (``simple_items_``, ``student_``).
 
 * ``dataclasses``
 
@@ -125,6 +135,9 @@ values must be delimited by commas, e.g. ``--options noconstraints,nobidi``):
 * ``sqlmodels``
 
   * all the options from ``declarative``
+  * ``nolinktables``: don't render many-to-many association tables as link model
+    classes (``Relationship(link_model=...)``); render them as plain ``Table`` objects
+    referenced via ``secondary`` instead
 
 Model class generators
 ----------------------
@@ -159,8 +172,9 @@ Relationships are detected based on existing foreign key constraints as follows:
 * **many-to-one**: a foreign key constraint exists on the table
 * **one-to-one**: same as **many-to-one**, but a unique constraint exists on the
   column(s) involved
-* **many-to-many**: (not implemented on the ``sqlmodel`` generator) an association table
-  is found to exist between two tables
+* **many-to-many**: an association table is found to exist between two tables (the
+  ``sqlmodels`` generator renders association tables that have a primary key as link
+  model classes, passed to the relationships via ``link_model=``)
 
 A table is considered an association table if it satisfies all of the following
 conditions:
@@ -183,6 +197,14 @@ due to that ``_id`` suffix.
 
 For self referential relationships, the reverse side of the relationship will be named
 with the ``_reverse`` suffix appended to it.
+
+When multiple foreign keys or junction tables connect to the same target table,
+relationships use qualifiers for disambiguation. One-to-many relationships use FK
+column names (e.g., ``simple_items_parent_container``, ``simple_items_top_container``).
+Many-to-many relationships use junction table names (e.g., ``students_enrollments``,
+``students_waitlist``), except for self-referential cases which use FK column names
+(e.g., ``parent``, ``child``). The ``nofknames`` option reverts to underscore suffixes
+(``simple_items_``, ``student_``).
 
 Customizing code generation logic
 =================================

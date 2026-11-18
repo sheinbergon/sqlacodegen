@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from textwrap import dedent
 
 import pytest
 from _pytest.fixtures import FixtureRequest
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy import TypeDecorator
 from sqlalchemy.dialects import mysql, postgresql, registry
 from sqlalchemy.dialects.mysql.pymysql import MySQLDialect_pymysql
@@ -21,7 +23,7 @@ from sqlalchemy.schema import (
 )
 from sqlalchemy.sql.expression import text
 from sqlalchemy.sql.sqltypes import DateTime, NullType
-from sqlalchemy.types import INTEGER, NUMERIC, SMALLINT, VARCHAR, Text
+from sqlalchemy.types import ARRAY, INTEGER, NUMERIC, SMALLINT, VARCHAR, Text
 
 from sqlacodegen.generators import CodeGenerator, TablesGenerator
 
@@ -60,6 +62,7 @@ def test_fancy_coltypes(generator: CodeGenerator) -> None:
         generator.generate(),
         """\
         from tests.test_generator_tables import TIMESTAMP_DECORATOR
+        import enum
 
         from pgvector.sqlalchemy.vector import VECTOR
         from sqlalchemy import Boolean, Column, Enum, MetaData, Numeric, Table
@@ -67,9 +70,14 @@ def test_fancy_coltypes(generator: CodeGenerator) -> None:
         metadata = MetaData()
 
 
+        class Blah(str, enum.Enum):
+            A = 'A'
+            B = 'B'
+
+
         t_simple_items = Table(
             'simple_items', metadata,
-            Column('enum', Enum('A', 'B', name='blah', schema='someschema')),
+            Column('enum', Enum(Blah, values_callable=lambda cls: [member.value for member in cls], name='blah', schema='someschema')),
             Column('bool', Boolean),
             Column('vector', VECTOR(3)),
             Column('number', Numeric(10, asdecimal=False)),
@@ -122,7 +130,8 @@ def test_arrays(generator: CodeGenerator) -> None:
     validate_code(
         generator.generate(),
         """\
-        from sqlalchemy import ARRAY, Column, Double, Integer, MetaData, Table
+        from sqlalchemy import Column, Double, Integer, MetaData, Table
+        from sqlalchemy.dialects.postgresql import ARRAY
 
         metadata = MetaData()
 
@@ -131,6 +140,36 @@ def test_arrays(generator: CodeGenerator) -> None:
             'simple_items', metadata,
             Column('dp_array', ARRAY(Double(precision=53))),
             Column('int_array', ARRAY(Integer()))
+        )
+        """,
+    )
+
+
+@pytest.mark.parametrize("engine", ["postgresql"], indirect=["engine"])
+def test_array_preserves_dialect_for_runtime_operators(
+    generator: CodeGenerator,
+) -> None:
+    """Regression test for GH-441."""
+    Table(
+        "simple_items",
+        generator.metadata,
+        Column("id", postgresql.TEXT, primary_key=True),
+        Column("tags", postgresql.ARRAY(postgresql.TEXT)),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        from sqlalchemy import Column, MetaData, Table, Text
+        from sqlalchemy.dialects.postgresql import ARRAY
+
+        metadata = MetaData()
+
+
+        t_simple_items = Table(
+            'simple_items', metadata,
+            Column('id', Text, primary_key=True),
+            Column('tags', ARRAY(Text()))
         )
         """,
     )
@@ -202,7 +241,7 @@ def test_json_default(generator: CodeGenerator) -> None:
     )
 
 
-def test_enum_detection(generator: CodeGenerator) -> None:
+def test_check_constraint_preserved(generator: CodeGenerator) -> None:
     Table(
         "simple_items",
         generator.metadata,
@@ -210,17 +249,256 @@ def test_enum_detection(generator: CodeGenerator) -> None:
         CheckConstraint(r"simple_items.enum IN ('A', '\'B', 'C')"),
     )
 
+    # Recreate generator with nosyntheticenums option to preserve constraints
+    generator = TablesGenerator(
+        generator.metadata, generator.bind, ["nosyntheticenums"]
+    )
+
     validate_code(
         generator.generate(),
         """\
-        from sqlalchemy import Column, Enum, MetaData, Table
+        from sqlalchemy import CheckConstraint, Column, MetaData, String, Table
 
         metadata = MetaData()
 
 
         t_simple_items = Table(
             'simple_items', metadata,
-            Column('enum', Enum('A', "\\\\'B", 'C'))
+            Column('enum', String(255)),
+            CheckConstraint("simple_items.enum IN ('A', '\\\\'B', 'C')")
+        )
+        """,
+    )
+
+
+def test_synthetic_enum_generation(generator: CodeGenerator) -> None:
+    Table(
+        "simple_items",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("status", VARCHAR(20)),
+        CheckConstraint("simple_items.status IN ('active', 'inactive', 'pending')"),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import CheckConstraint, Column, Enum, Integer, MetaData, Table
+
+        metadata = MetaData()
+
+
+        class SimpleItemsStatus(str, enum.Enum):
+            ACTIVE = 'active'
+            INACTIVE = 'inactive'
+            PENDING = 'pending'
+
+
+        t_simple_items = Table(
+            'simple_items', metadata,
+            Column('id', Integer, primary_key=True),
+            Column('status', Enum(SimpleItemsStatus, values_callable=lambda cls: [member.value for member in cls])),
+            CheckConstraint("simple_items.status IN ('active', 'inactive', 'pending')")
+        )
+        """,
+    )
+
+
+def test_enum_shared_values(generator: CodeGenerator) -> None:
+    from sqlalchemy import Enum as SAEnum
+
+    Table(
+        "users",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("status", SAEnum("active", "inactive", "pending", name="status_enum")),
+    )
+    Table(
+        "accounts",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("status", SAEnum("active", "inactive", "pending", name="status_enum")),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import Column, Enum, Integer, MetaData, Table
+
+        metadata = MetaData()
+
+
+        class StatusEnum(str, enum.Enum):
+            ACTIVE = 'active'
+            INACTIVE = 'inactive'
+            PENDING = 'pending'
+
+
+        t_accounts = Table(
+            'accounts', metadata,
+            Column('id', Integer, primary_key=True),
+            Column('status', Enum(StatusEnum, values_callable=lambda cls: [member.value for member in cls], name='status_enum'))
+        )
+
+        t_users = Table(
+            'users', metadata,
+            Column('id', Integer, primary_key=True),
+            Column('status', Enum(StatusEnum, values_callable=lambda cls: [member.value for member in cls], name='status_enum'))
+        )
+        """,
+    )
+
+
+def test_array_enum_named(generator: CodeGenerator) -> None:
+    Table(
+        "users",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("roles", ARRAY(SAEnum("admin", "user", "moderator", name="role_enum"))),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import ARRAY, Column, Enum, Integer, MetaData, Table
+
+        metadata = MetaData()
+
+
+        class RoleEnum(str, enum.Enum):
+            ADMIN = 'admin'
+            USER = 'user'
+            MODERATOR = 'moderator'
+
+
+        t_users = Table(
+            'users', metadata,
+            Column('id', Integer, primary_key=True),
+            Column('roles', ARRAY(Enum(RoleEnum, values_callable=lambda cls: [member.value for member in cls], name='role_enum')))
+        )
+        """,
+    )
+
+
+def test_array_enum_shared(generator: CodeGenerator) -> None:
+    Table(
+        "users",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("roles", ARRAY(SAEnum("admin", "user", name="role_enum"))),
+    )
+    Table(
+        "groups",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column("allowed_roles", ARRAY(SAEnum("admin", "user", name="role_enum"))),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import ARRAY, Column, Enum, Integer, MetaData, Table
+
+        metadata = MetaData()
+
+
+        class RoleEnum(str, enum.Enum):
+            ADMIN = 'admin'
+            USER = 'user'
+
+
+        t_groups = Table(
+            'groups', metadata,
+            Column('id', Integer, primary_key=True),
+            Column('allowed_roles', ARRAY(Enum(RoleEnum, values_callable=lambda cls: [member.value for member in cls], name='role_enum')))
+        )
+
+        t_users = Table(
+            'users', metadata,
+            Column('id', Integer, primary_key=True),
+            Column('roles', ARRAY(Enum(RoleEnum, values_callable=lambda cls: [member.value for member in cls], name='role_enum')))
+        )
+        """,
+    )
+
+
+def test_enum_named_with_schema(generator: CodeGenerator) -> None:
+    Table(
+        "my_table",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "status",
+            SAEnum("active", "inactive", name="status_enum", schema="custom_schema"),
+        ),
+        schema="custom_schema",
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import Column, Enum, Integer, MetaData, Table
+
+        metadata = MetaData()
+
+
+        class StatusEnum(str, enum.Enum):
+            ACTIVE = 'active'
+            INACTIVE = 'inactive'
+
+
+        t_my_table = Table(
+            'my_table', metadata,
+            Column('id', Integer, primary_key=True),
+            Column('status', Enum(StatusEnum, values_callable=lambda cls: [member.value for member in cls], name='status_enum', schema='custom_schema')),
+            schema='custom_schema'
+        )
+        """,
+    )
+
+
+def test_array_enum_named_with_schema(generator: CodeGenerator) -> None:
+    Table(
+        "my_table",
+        generator.metadata,
+        Column("id", INTEGER, primary_key=True),
+        Column(
+            "tags",
+            ARRAY(SAEnum("a", "b", name="tag_enum", schema="custom_schema")),
+        ),
+        schema="custom_schema",
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        import enum
+
+        from sqlalchemy import ARRAY, Column, Enum, Integer, MetaData, Table
+
+        metadata = MetaData()
+
+
+        class TagEnum(str, enum.Enum):
+            A = 'a'
+            B = 'b'
+
+
+        t_my_table = Table(
+            'my_table', metadata,
+            Column('id', Integer, primary_key=True),
+            Column('tags', ARRAY(Enum(TagEnum, values_callable=lambda cls: [member.value for member in cls], name='tag_enum', schema='custom_schema'))),
+            schema='custom_schema'
         )
         """,
     )
@@ -352,6 +630,34 @@ def test_mysql_column_types(generator: CodeGenerator) -> None:
             Column('name', String(255)),
             Column('double', DOUBLE(1, 2)),
             Column('set', SET('one', 'two'))
+        )
+        """,
+    )
+
+
+@pytest.mark.parametrize("engine", ["mysql"], indirect=["engine"])
+@pytest.mark.parametrize("generator", [["keep_dialect_types"]], indirect=True)
+def test_mysql_char_collation_keep_dialect_types(generator: CodeGenerator) -> None:
+    Table(
+        "simple_items",
+        generator.metadata,
+        Column("id", mysql.INTEGER, primary_key=True),
+        Column("result_code", mysql.CHAR(1, collation="utf8mb3_bin"), nullable=False),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        from sqlalchemy import Column, MetaData, Table
+        from sqlalchemy.dialects.mysql import CHAR, INTEGER
+
+        metadata = MetaData()
+
+
+        t_simple_items = Table(
+            'simple_items', metadata,
+            Column('id', INTEGER, primary_key=True),
+            Column('result_code', CHAR(1, collation='utf8mb3_bin'), nullable=False)
         )
         """,
     )
@@ -924,6 +1230,40 @@ def test_identity_column(generator: CodeGenerator) -> None:
             INTEGER,
             primary_key=True,
             server_default=Identity(start=1, increment=2),
+        ),
+    )
+
+    validate_code(
+        generator.generate(),
+        """\
+        from sqlalchemy import Column, Identity, Integer, MetaData, Table
+
+        metadata = MetaData()
+
+
+        t_simple_items = Table(
+            'simple_items', metadata,
+            Column('id', Integer, Identity(start=1, increment=2), primary_key=True)
+        )
+        """,
+    )
+
+
+def test_identity_column_decimal_values(generator: CodeGenerator) -> None:
+    # MSSQL reflects Identity column parameters (start, increment) as Decimal
+    # values instead of integers. This test ensures those are serialized correctly.
+    identity = Identity(start=1, increment=2)
+    # Simulate database reflection returning Decimal values (as MSSQL does)
+    identity.start = Decimal("1")  # type: ignore[assignment]
+    identity.increment = Decimal("2")  # type: ignore[assignment]
+    Table(
+        "simple_items",
+        generator.metadata,
+        Column(
+            "id",
+            INTEGER,
+            primary_key=True,
+            server_default=identity,
         ),
     )
 
